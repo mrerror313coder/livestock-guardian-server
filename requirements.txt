@@ -2,6 +2,6 @@ fastapi
 uvicorn[standard]
 onnxruntime
 Pillow
-torchvision
 numpy
 python-multipart
+requests
