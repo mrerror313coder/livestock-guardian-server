@@ -1,12 +1,8 @@
 # ============================================================
-# UPDATED fastapi_server.py
-# Use this exact version for Render deployment
+# COMPLETE fastapi_server.py — FINAL VERSION
+# With auto model download from Hugging Face
+# Ready for Render.com deployment
 # ============================================================
-
-"""
-Livestock Guardian — Biometric API Server
-Deployed on Render.com (FREE)
-"""
 
 from fastapi import (FastAPI, UploadFile, File,
                      HTTPException, Form, Depends, Security)
@@ -18,6 +14,7 @@ import io
 import os
 import hashlib
 import logging
+import urllib.request
 from PIL import Image
 import onnxruntime as ort
 import torchvision.transforms as transforms
@@ -30,13 +27,74 @@ logging.basicConfig(
 )
 logger = logging.getLogger("livestock_guardian")
 
+# ── HUGGING FACE CONFIG ──
+# Set these as Environment Variables in Render dashboard
+HF_USERNAME = os.environ.get("HF_USERNAME", "YOUR_USERNAME")
+HF_REPO     = os.environ.get("HF_REPO", "livestock-guardian-muzzle-model")
+HF_TOKEN    = os.environ.get("HF_TOKEN", "")  # For private repos
+
+MODELS_DIR  = "models"
+
+MODEL_FILES = {
+    "muzzle_encoder.onnx": (
+        f"https://huggingface.co/{HF_USERNAME}/{HF_REPO}"
+        f"/resolve/main/muzzle_encoder.onnx"
+    ),
+    "model_config.json": (
+        f"https://huggingface.co/{HF_USERNAME}/{HF_REPO}"
+        f"/resolve/main/model_config.json"
+    ),
+    "api_keys_config.json": (
+        f"https://huggingface.co/{HF_USERNAME}/{HF_REPO}"
+        f"/resolve/main/api_keys_config.json"
+    ),
+}
+
+
+def download_all_models():
+    """Download model files from Hugging Face"""
+    os.makedirs(MODELS_DIR, exist_ok=True)
+
+    for filename, url in MODEL_FILES.items():
+        filepath = os.path.join(MODELS_DIR, filename)
+
+        if os.path.exists(filepath):
+            logger.info(f"Exists: {filename}")
+            continue
+
+        logger.info(f"Downloading: {filename}...")
+
+        try:
+            headers = {}
+            if HF_TOKEN:
+                headers["Authorization"] = f"Bearer {HF_TOKEN}"
+
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                with open(filepath, 'wb') as f:
+                    while True:
+                        chunk = resp.read(8192)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+
+            size = os.path.getsize(filepath) / 1e6
+            logger.info(f"Downloaded: {filename} ({size:.1f} MB)")
+
+        except Exception as e:
+            logger.error(f"Download failed for {filename}: {e}")
+            raise RuntimeError(f"Model download failed: {e}")
+
+
+# Download on startup
+download_all_models()
+
 # ── APP ──
 app = FastAPI(
     title="Livestock Guardian Biometric API",
     description="AI muzzle recognition for livestock identity",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    docs_url="/docs"
 )
 
 app.add_middleware(
@@ -47,221 +105,120 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── API KEY SECURITY ──
+# ── API KEY ──
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 def load_valid_keys():
-    """Load hashed API keys from config"""
     try:
-        keys_path = os.path.join("models", "api_keys_config.json")
-        with open(keys_path) as f:
+        with open(os.path.join(MODELS_DIR, "api_keys_config.json")) as f:
             data = json.load(f)
-        return {
-            k["key_hash"]: k
-            for k in data["keys"]
-            if k["active"]
-        }
+        return {k["key_hash"]: k for k in data["keys"] if k["active"]}
     except Exception as e:
-        logger.error(f"Failed to load API keys: {e}")
+        logger.error(f"Keys load error: {e}")
         return {}
 
 
 def verify_api_key(api_key: str = Security(api_key_header)):
-    """Verify API key from request header X-API-Key"""
     if not api_key:
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": "API key missing",
-                "fix": "Add header: X-API-Key: your_key_here"
-            }
-        )
-
-    key_hash  = hashlib.sha256(api_key.encode()).hexdigest()
-    valid_keys = load_valid_keys()
-
-    if key_hash not in valid_keys:
-        logger.warning(f"Invalid API key attempt")
-        raise HTTPException(
-            status_code=403,
-            detail={"error": "Invalid API key"}
-        )
-
-    key_info = valid_keys[key_hash]
-    logger.info(f"Valid request from: {key_info['name']}")
-    return key_info
+        raise HTTPException(401, "API key missing. Add X-API-Key header.")
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    valid    = load_valid_keys()
+    if key_hash not in valid:
+        raise HTTPException(403, "Invalid API key.")
+    logger.info(f"Request from: {valid[key_hash]['name']}")
+    return valid[key_hash]
 
 
-# ── LOAD MODEL ON STARTUP ──
-MODEL_LOADED = False
-session      = None
-config       = None
-transform    = None
-IMG_SIZE     = 128
+# ── LOAD MODEL ──
+with open(os.path.join(MODELS_DIR, "model_config.json")) as f:
+    config = json.load(f)
+
+session  = ort.InferenceSession(
+    os.path.join(MODELS_DIR, "muzzle_encoder.onnx")
+)
+IMG_SIZE = config["image_size"]
+
+transform = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        config["normalize_mean"],
+        config["normalize_std"]
+    )
+])
+
+logger.info(f"Model ready! Size:{IMG_SIZE} Emb:{config['embedding_size']}")
 
 
-def load_model():
-    """Load ONNX model and config"""
-    global MODEL_LOADED, session, config, transform, IMG_SIZE
-
-    try:
-        config_path = os.path.join("models", "model_config.json")
-        model_path  = os.path.join("models", "muzzle_encoder.onnx")
-
-        with open(config_path) as f:
-            config = json.load(f)
-
-        session  = ort.InferenceSession(model_path)
-        IMG_SIZE = config["image_size"]
-
-        transform = transforms.Compose([
-            transforms.Resize((IMG_SIZE, IMG_SIZE)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                config["normalize_mean"],
-                config["normalize_std"]
-            )
-        ])
-
-        MODEL_LOADED = True
-        logger.info(f"Model loaded successfully!")
-        logger.info(f"Image size: {IMG_SIZE} | Embedding: {config['embedding_size']}")
-
-    except Exception as e:
-        logger.error(f"Model loading failed: {e}")
-        MODEL_LOADED = False
-
-
-# Load when app starts
-load_model()
-
-
-# ── HELPER FUNCTIONS ──
+# ── HELPERS ──
 def image_to_embedding(image_bytes: bytes) -> list:
-    """Convert image bytes to embedding vector"""
-    if not MODEL_LOADED:
-        raise Exception("Model not loaded")
-
     img    = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     tensor = transform(img).unsqueeze(0).numpy()
-    emb    = session.run(
-        ["embedding"],
-        {"muzzle_image": tensor}
-    )[0][0]
-
-    norm = np.linalg.norm(emb)
-    normalized = emb / norm if norm > 0 else emb
-    return normalized.tolist()
+    emb    = session.run(["embedding"], {"muzzle_image": tensor})[0][0]
+    norm   = np.linalg.norm(emb)
+    return (emb / norm if norm > 0 else emb).tolist()
 
 
-def cosine_similarity(e1: list, e2: list) -> float:
-    """Cosine similarity between two embeddings"""
-    return float(np.clip(
-        np.dot(np.array(e1), np.array(e2)), 0, 1
-    ))
+def cos_sim(e1, e2) -> float:
+    return float(np.clip(np.dot(np.array(e1), np.array(e2)), 0, 1))
 
 
-def get_prd_status(confidence: float) -> dict:
-    """
-    PRD-defined confidence thresholds:
-    > 90%   → CONFIRMED_MATCH (Green)
-    85-90%  → WARNING (Amber)
-    < 85%   → NO_MATCH (Red)
-    """
-    if confidence > 90:
-        return {
-            "status": "CONFIRMED_MATCH",
-            "color":  "GREEN",
-            "action": "Identity confirmed"
-        }
-    elif confidence >= 85:
-        return {
-            "status": "WARNING",
-            "color":  "AMBER",
-            "action": "Manual verification recommended"
-        }
-    return {
-        "status": "NO_MATCH",
-        "color":  "RED",
-        "action": "Re-scan required or new animal"
-    }
+def prd_status(conf: float) -> dict:
+    if conf > 90:
+        return {"status": "CONFIRMED_MATCH", "color": "GREEN",
+                "action": "Identity confirmed"}
+    elif conf >= 85:
+        return {"status": "WARNING", "color": "AMBER",
+                "action": "Manual verification recommended"}
+    return {"status": "NO_MATCH", "color": "RED",
+            "action": "Re-scan required"}
 
 
-# ════════════════════════════════════════
-# PUBLIC ENDPOINTS (No API key needed)
-# ════════════════════════════════════════
-
+# ── PUBLIC ENDPOINTS ──
 @app.get("/")
 def root():
-    """Server info"""
     return {
-        "service":     "Livestock Guardian Biometric API",
-        "version":     "1.0.0",
-        "status":      "running",
-        "model_ready": MODEL_LOADED,
-        "docs":        "/docs",
-        "timestamp":   datetime.now().isoformat()
+        "service":   "Livestock Guardian Biometric API",
+        "version":   "1.0.0",
+        "status":    "running",
+        "docs":      "/docs",
+        "timestamp": datetime.now().isoformat()
     }
 
 
 @app.get("/health")
 def health():
-    """Health check — use this to check if server is awake"""
     return {
-        "status":       "healthy" if MODEL_LOADED else "model_error",
-        "model_loaded": MODEL_LOADED,
-        "embedding_size": config["embedding_size"] if config else 0,
+        "status":         "healthy",
+        "model_loaded":   True,
+        "embedding_size": config["embedding_size"],
         "image_size":     IMG_SIZE,
         "timestamp":      datetime.now().isoformat()
     }
 
 
-# ════════════════════════════════════════
-# PROTECTED ENDPOINTS (API key required)
-# ════════════════════════════════════════
-
+# ── PROTECTED ENDPOINTS ──
 @app.post("/biometric/generate-embedding")
 async def generate_embedding(
     file:     UploadFile = File(...),
     key_info: dict       = Depends(verify_api_key)
 ):
-    """
-    Generate 128-dim embedding for a muzzle image
-
-    Headers required:
-      X-API-Key: your_android_key_here
-
-    Body:
-      file: muzzle image (jpg/png)
-
-    Returns:
-      embedding: list of 128 floats
-    """
     try:
-        image_bytes = await file.read()
-
-        if len(image_bytes) == 0:
-            raise HTTPException(400, "Empty file uploaded")
-
-        if len(image_bytes) > 10 * 1024 * 1024:  # 10MB limit
-            raise HTTPException(400, "File too large (max 10MB)")
-
-        embedding = image_to_embedding(image_bytes)
-
+        data = await file.read()
+        if not data:
+            raise HTTPException(400, "Empty file")
+        emb = image_to_embedding(data)
         return {
             "success":        True,
-            "embedding":      embedding,
-            "embedding_size": len(embedding),
-            "client":         key_info["name"],
+            "embedding":      emb,
+            "embedding_size": len(emb),
             "timestamp":      datetime.now().isoformat()
         }
-
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Embedding generation error: {e}")
-        raise HTTPException(500, f"Processing failed: {str(e)}")
+        raise HTTPException(500, str(e))
 
 
 @app.post("/biometric/register-muzzle")
@@ -269,34 +226,17 @@ async def register_muzzle(
     file:     UploadFile = File(...),
     key_info: dict       = Depends(verify_api_key)
 ):
-    """
-    Generate embedding for new animal registration
-
-    After calling this:
-    1. Save livestock data to Supabase 'livestock' table
-    2. Save returned embedding to Supabase 'embeddings' table
-    3. Link embedding to livestock via livestock_id
-    """
     try:
-        image_bytes = await file.read()
-
-        if len(image_bytes) == 0:
+        data = await file.read()
+        if not data:
             raise HTTPException(400, "Empty file")
-
-        embedding = image_to_embedding(image_bytes)
-
+        emb = image_to_embedding(data)
         return {
             "success":        True,
-            "embedding":      embedding,
-            "embedding_size": len(embedding),
-            "next_steps": [
-                "1. Save livestock to Supabase 'livestock' table",
-                "2. Save embedding to Supabase 'embeddings' table",
-                "3. Link with livestock_id"
-            ],
-            "timestamp": datetime.now().isoformat()
+            "embedding":      emb,
+            "embedding_size": len(emb),
+            "timestamp":      datetime.now().isoformat()
         }
-
     except HTTPException:
         raise
     except Exception as e:
@@ -309,58 +249,33 @@ async def match_muzzle(
     records_json: str        = Form(...),
     key_info:     dict       = Depends(verify_api_key)
 ):
-    """
-    Match muzzle image against stored embeddings
-
-    Body:
-      file:         muzzle image
-      records_json: JSON string of stored embeddings
-                    [{"livestock_id": "uuid", "embedding": [...]}, ...]
-
-    Returns:
-      match result with PRD confidence status
-    """
     try:
-        image_bytes    = await file.read()
-        query_embedding = np.array(image_to_embedding(image_bytes))
-        records        = json.loads(records_json)
+        query   = np.array(image_to_embedding(await file.read()))
+        records = json.loads(records_json)
 
         if not records:
-            return {
-                "match_found": False,
-                "message":     "Database is empty",
-                "embedding":   query_embedding.tolist()
-            }
+            return {"match_found": False, "message": "Empty database",
+                    "embedding": query.tolist()}
 
-        best_confidence = 0.0
-        best_id         = None
+        best_conf, best_id = 0.0, None
+        for r in records:
+            conf = round(cos_sim(query.tolist(),
+                                 np.array(r["embedding"]).tolist()) * 100, 2)
+            if conf > best_conf:
+                best_conf, best_id = conf, r["livestock_id"]
 
-        for record in records:
-            stored_emb = np.array(record["embedding"])
-            similarity  = cosine_similarity(
-                query_embedding.tolist(),
-                stored_emb.tolist()
-            )
-            confidence = round(similarity * 100, 2)
-
-            if confidence > best_confidence:
-                best_confidence = confidence
-                best_id         = record["livestock_id"]
-
-        status_info = get_prd_status(best_confidence)
-
+        status = prd_status(best_conf)
         return {
-            "match_found":  status_info["status"] != "NO_MATCH",
-            "livestock_id": best_id,
-            "confidence":   best_confidence,
-            "status":       status_info["status"],
-            "color":        status_info["color"],
-            "action":       status_info["action"],
+            "match_found":    status["status"] != "NO_MATCH",
+            "livestock_id":   best_id,
+            "confidence":     best_conf,
+            "status":         status["status"],
+            "color":          status["color"],
+            "action":         status["action"],
             "total_compared": len(records),
-            "embedding":    query_embedding.tolist(),
-            "timestamp":    datetime.now().isoformat()
+            "embedding":      query.tolist(),
+            "timestamp":      datetime.now().isoformat()
         }
-
     except HTTPException:
         raise
     except Exception as e:
@@ -373,52 +288,38 @@ async def check_duplicate(
     records_json: str        = Form(...),
     key_info:     dict       = Depends(verify_api_key)
 ):
-    """
-    Check if animal already registered (before new registration)
-    Prevents duplicate entries — PRD requirement
-
-    Returns:
-      is_duplicate: true/false
-      If duplicate: returns existing livestock_id
-    """
     try:
-        image_bytes     = await file.read()
-        query_embedding = np.array(image_to_embedding(image_bytes))
-        records         = json.loads(records_json)
+        query   = np.array(image_to_embedding(await file.read()))
+        records = json.loads(records_json)
+        highest = 0.0
 
-        highest_confidence = 0.0
-
-        for record in records:
-            stored_emb = np.array(record["embedding"])
-            similarity  = cosine_similarity(
-                query_embedding.tolist(),
-                stored_emb.tolist()
-            )
-            confidence = round(similarity * 100, 2)
-
-            if confidence > highest_confidence:
-                highest_confidence = confidence
-
-            # PRD: >90% = confirmed duplicate
-            if confidence > 90:
+        for r in records:
+            conf = round(cos_sim(query.tolist(),
+                                 np.array(r["embedding"]).tolist()) * 100, 2)
+            if conf > highest:
+                highest = conf
+            if conf > 90:
                 return {
                     "is_duplicate":          True,
-                    "duplicate_livestock_id": record["livestock_id"],
-                    "confidence":            confidence,
-                    "message":               "Animal already registered!",
-                    "embedding":             query_embedding.tolist(),
+                    "duplicate_livestock_id": r["livestock_id"],
+                    "confidence":            conf,
+                    "embedding":             query.tolist(),
                     "timestamp":             datetime.now().isoformat()
                 }
 
         return {
-            "is_duplicate":      False,
-            "highest_confidence": highest_confidence,
-            "message":           "New animal — safe to register",
-            "embedding":         query_embedding.tolist(),
-            "timestamp":         datetime.now().isoformat()
+            "is_duplicate":       False,
+            "highest_confidence": highest,
+            "embedding":          query.tolist(),
+            "timestamp":          datetime.now().isoformat()
         }
-
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
