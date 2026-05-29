@@ -1,0 +1,32 @@
+{
+  "model_type": "SiameseNetwork",
+  "backbone": "MobileNetV3-Small",
+  "embedding_size": 128,
+  "image_size": 128,
+  "normalize_mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "normalize_std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "best_threshold": 0.5700000000000002,
+  "best_epoch": 28,
+  "best_val_loss": 0.04377867311704904,
+  "test_accuracy": 0.875,
+  "test_f1": 0.8790560471976401,
+  "prd_thresholds": {
+    "confirmed_match": 90,
+    "warning": 85,
+    "no_match": 0
+  },
+  "training_config": {
+    "epochs": 30,
+    "batch_size": 16,
+    "learning_rate": 0.0003,
+    "use_fp16": true
+  }
+}
