@@ -1,7 +1,7 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-onnxruntime==1.16.3
-Pillow==10.1.0
-torchvision==0.16.1
-numpy==1.24.3
-python-multipart==0.0.6
+fastapi
+uvicorn[standard]
+onnxruntime
+Pillow
+torchvision
+numpy
+python-multipart
