@@ -1,0 +1,45 @@
+{
+  "keys": [
+    {
+      "name": "android_app",
+      "key_hash": "6756a6719f5f466e4bf1505d54da651bab9c23debbbd9043bb02ef3f7d1b9ee5",
+      "permissions": [
+        "register",
+        "match",
+        "check_duplicate"
+      ],
+      "created_at": "2026-05-29T00:30:16.297319",
+      "active": true
+    },
+    {
+      "name": "web_dashboard",
+      "key_hash": "3c4ae78a4c44f66afc09b923c61e3fe78ebcbd18e4450d0e5483030c4896fee4",
+      "permissions": [
+        "register",
+        "match",
+        "check_duplicate"
+      ],
+      "created_at": "2026-05-29T00:30:16.297334",
+      "active": true
+    },
+    {
+      "name": "admin",
+      "key_hash": "7e4e9a9f1babe822b92775217787886ef6bd3e93fac67905586d65ef4069c185",
+      "permissions": [
+        "all"
+      ],
+      "created_at": "2026-05-29T00:30:16.297341",
+      "active": true
+    },
+    {
+      "name": "testing",
+      "key_hash": "848779dc086a940631bad36d19bc0130b469c14752ddd9d3023765c7c890c40e",
+      "permissions": [
+        "register",
+        "match"
+      ],
+      "created_at": "2026-05-29T00:30:16.297347",
+      "active": true
+    }
+  ]
+}
