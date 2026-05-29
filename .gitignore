@@ -1,0 +1,34 @@
+# GITIGNORE FOR LIVESTOCK GUARDIAN SERVER
+
+# Never upload private keys
+PRIVATE_actual_keys.json
+
+# Never upload large model file to git
+# (we will upload directly to Render)
+models/muzzle_encoder.onnx
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
